@@ -11,22 +11,20 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /**
  * Hide the gesture-navigation "pill" / home handle on Android 17 (PixelOS).
  *
- * ROOT CAUSE (v4, corrected after real device logs):
- *   The handle is drawn by the Launcher process, class:
- *     com.android.launcher3.taskbar.StashedHandleView extends android.view.View
+ * HISTORY:
+ *   v3 hooked StashedHandleView.draw -> NoSuchMethodError (class has no draw()).
+ *   v4 hooked updateHandleColor + View.setBackgroundColor. Both hooks fired
+ *      successfully (confirmed via LSPosed logs), but the pill only turned
+ *      BLACK instead of disappearing -> clearing the background colour is NOT
+ *      enough; the bar is still painted by another layer/mechanism.
  *
- *   This class has NO draw(Canvas) and NO onDraw() override (v3 hooking draw()
- *   failed with NoSuchMethodError). It paints the rounded bar PURELY through its
- *   background colour. The only colour entry point is:
- *     updateHandleColor(boolean dark, boolean animate)
- *        -> ObjectAnimator on VIEW_BACKGROUND_COLOR, or
- *           View.setBackgroundColor(colour)
- *
- * STRATEGY (minimal, zero side effects):
- *   1. Hook StashedHandleView.updateHandleColor(boolean, boolean) -> no-op.
- *   2. Guard hook View.setBackgroundColor(int): force transparent when the
- *      target is a StashedHandleView.
- *   The View stays alive, so layout/insets/touch/gestures are unaffected.
+ * STRATEGY (v5, decisive):
+ *   Force the StashedHandleView itself to be invisible. A pure drawing View has
+ *   no touch handling, so hiding it cannot affect swipe-up / back / assistant.
+ *   1. Hook every StashedHandleView constructor -> right after creation call
+ *      setVisibility(INVISIBLE) + setAlpha(0f) + setBackgroundColor(TRANSPARENT).
+ *   2. Hook updateHandleColor(boolean, boolean) -> no-op (belt & braces).
+ *   3. Guard hook View.setBackgroundColor(int) for StashedHandleView instances.
  *
  * SCOPE: com.google.android.apps.nexuslauncher (Launcher3).
  */
@@ -41,6 +39,16 @@ public class HideHandleModule implements IXposedHookLoadPackage {
         XposedBridge.log("[" + TAG + "] " + s);
     }
 
+    private void hide(View v) {
+        try {
+            v.setVisibility(View.INVISIBLE);
+            v.setAlpha(0f);
+            v.setBackgroundColor(0x00000000);
+        } catch (Throwable t) {
+            log("hide() failed: " + t);
+        }
+    }
+
     private void hookView(ClassLoader cl) {
         Class<?> handleView;
         try {
@@ -50,19 +58,39 @@ public class HideHandleModule implements IXposedHookLoadPackage {
             return;
         }
 
+        // 1) Hide the view as soon as any constructor returns.
+        try {
+            XposedBridge.hookAllConstructors(handleView, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof View) {
+                        hide((View) param.thisObject);
+                    }
+                }
+            });
+            log("Hooked StashedHandleView constructors -> hidden");
+        } catch (Throwable t) {
+            log("FAILED constructor hook: " + t);
+        }
+
+        // 2) Neutralise the colour entry point.
         try {
             XposedHelpers.findAndHookMethod(handleView, "updateHandleColor",
                     boolean.class, boolean.class, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             param.setResult(null);
+                            if (param.thisObject instanceof View) {
+                                hide((View) param.thisObject);
+                            }
                         }
                     });
-            log("Hooked updateHandleColor -> pill stays transparent");
+            log("Hooked updateHandleColor -> no-op + hidden");
         } catch (Throwable t) {
             log("FAILED updateHandleColor hook: " + t);
         }
 
+        // 3) Guard any background colour write on the handle.
         try {
             XposedHelpers.findAndHookMethod(View.class, "setBackgroundColor",
                     int.class, new XC_MethodHook() {
@@ -70,6 +98,10 @@ public class HideHandleModule implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             if (handleView.isInstance(param.thisObject)) {
                                 param.args[0] = 0x00000000;
+                                if (param.thisObject instanceof View) {
+                                    ((View) param.thisObject)
+                                            .setVisibility(View.INVISIBLE);
+                                }
                             }
                         }
                     });
@@ -83,6 +115,6 @@ public class HideHandleModule implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!LAUNCHER.equals(lpparam.packageName)) return;
         hookView(lpparam.classLoader);
-        log("HideNavPill module active (launcher scope) v4");
+        log("HideNavPill module active (launcher scope) v5");
     }
 }
