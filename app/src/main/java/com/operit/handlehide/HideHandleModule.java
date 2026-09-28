@@ -1,6 +1,6 @@
 package com.operit.handlehide;
 
-import android.graphics.Canvas;
+import android.view.View;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -11,34 +11,24 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /**
  * Hide the gesture-navigation "pill" / home handle on Android 17 (PixelOS).
  *
- * ROOT CAUSE (v3, corrected after dynamic evidence collection):
- *   On this device the navigation bar window is NOT owned by SystemUI.
- *   `dumpsys window displays` shows mNavigationBar pointing at the window owned
- *   by the Launcher process (com.google.android.apps.nexuslauncher, uid 10196),
- *   whose WindowRootImpl surface is named "VRI-Taskbar". The real handle is
- *   drawn by the Launcher's Quickstep/Taskbar code:
- *
- *     com.android.launcher3.taskbar.StashedHandleViewController
- *         implements com.android.quickstep.NavHandle
+ * ROOT CAUSE (v4, corrected after real device logs):
+ *   The handle is drawn by the Launcher process, class:
  *     com.android.launcher3.taskbar.StashedHandleView extends android.view.View
  *
- *   StashedHandleView has NO onDraw of its own; it paints the small rounded bar
- *   purely through its background (View.setBackgroundColor / background drawable),
- *   as seen in StashedHandleView.updateHandleColor() which calls
- *   setBackgroundColor() / ObjectAnimator on VIEW_BACKGROUND_COLOR.
- *
- *   That is why hooking SystemUI's NavigationHandle / QuickswitchOrientedNavHandle
- *   logged fine (the classes exist) but did nothing: those classes are never
- *   instantiated on this build.
+ *   This class has NO draw(Canvas) and NO onDraw() override (v3 hooking draw()
+ *   failed with NoSuchMethodError). It paints the rounded bar PURELY through its
+ *   background colour. The only colour entry point is:
+ *     updateHandleColor(boolean dark, boolean animate)
+ *        -> ObjectAnimator on VIEW_BACKGROUND_COLOR, or
+ *           View.setBackgroundColor(colour)
  *
  * STRATEGY (minimal, zero side effects):
- *   Hook StashedHandleView.draw(Canvas) and make it a no-op -> the bar is never
- *   rasterized. The View itself is left untouched, so layout, window insets,
- *   touch regions and gesture handling (swipe-up-home, edge back, long-press for
- *   assistant) are completely unaffected.
- *   A second guard hooks setBackgroundColor(int) to force full transparency.
+ *   1. Hook StashedHandleView.updateHandleColor(boolean, boolean) -> no-op.
+ *   2. Guard hook View.setBackgroundColor(int): force transparent when the
+ *      target is a StashedHandleView.
+ *   The View stays alive, so layout/insets/touch/gestures are unaffected.
  *
- * SCOPE: enable for com.google.android.apps.nexuslauncher (Launcher3).
+ * SCOPE: com.google.android.apps.nexuslauncher (Launcher3).
  */
 public class HideHandleModule implements IXposedHookLoadPackage {
 
@@ -52,33 +42,40 @@ public class HideHandleModule implements IXposedHookLoadPackage {
     }
 
     private void hookView(ClassLoader cl) {
+        Class<?> handleView;
         try {
-            Class<?> c = XposedHelpers.findClass(HANDLE_VIEW, cl);
+            handleView = XposedHelpers.findClass(HANDLE_VIEW, cl);
+        } catch (Throwable t) {
+            log("class not found " + HANDLE_VIEW + ": " + t);
+            return;
+        }
 
-            XposedHelpers.findAndHookMethod(c, "draw", Canvas.class,
-                    new XC_MethodHook() {
+        try {
+            XposedHelpers.findAndHookMethod(handleView, "updateHandleColor",
+                    boolean.class, boolean.class, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             param.setResult(null);
                         }
                     });
-            log("Hooked " + HANDLE_VIEW + ".draw -> pill hidden");
+            log("Hooked updateHandleColor -> pill stays transparent");
+        } catch (Throwable t) {
+            log("FAILED updateHandleColor hook: " + t);
+        }
 
-            try {
-                XposedHelpers.findAndHookMethod(c, "setBackgroundColor", int.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+        try {
+            XposedHelpers.findAndHookMethod(View.class, "setBackgroundColor",
+                    int.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (handleView.isInstance(param.thisObject)) {
                                 param.args[0] = 0x00000000;
                             }
-                        });
-                log("Hooked " + HANDLE_VIEW + ".setBackgroundColor -> transparent");
-            } catch (Throwable t) {
-                log("skip setBackgroundColor: " + t);
-            }
-
+                        }
+                    });
+            log("Hooked View.setBackgroundColor (guard for StashedHandleView)");
         } catch (Throwable t) {
-            log("skip " + HANDLE_VIEW + ": " + t);
+            log("FAILED setBackgroundColor guard: " + t);
         }
     }
 
@@ -86,6 +83,6 @@ public class HideHandleModule implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!LAUNCHER.equals(lpparam.packageName)) return;
         hookView(lpparam.classLoader);
-        log("HideNavPill module active (launcher scope)");
+        log("HideNavPill module active (launcher scope) v4");
     }
 }
