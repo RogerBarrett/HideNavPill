@@ -1,0 +1,39 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.operit.handlehide'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.operit.handlehide"
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Sign the release apk with the AGP built-in debug keystore so it is
+            // directly installable. (AGP creates ~/.android/debug.keystore itself.)
+            signingConfig signingConfigs.getByName("debug")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        resources.excludes += "META-INF/*.kotlin_module"
+    }
+}
+
+dependencies {
+    // compileOnly: the Xposed API is provided at runtime by LSPosed.
+    compileOnly 'de.robv.android.xposed:api:82'
+}

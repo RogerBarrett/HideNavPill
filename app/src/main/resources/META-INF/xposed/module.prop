@@ -1,0 +1,6 @@
+id=com.operit.handlehide
+name=Hide Nav Pill
+author=operit
+version=1.0
+versionCode=1
+description=Hides the gesture navigation pill (home handle) by suppressing NavigationHandle.onDraw. Gestures unaffected.
