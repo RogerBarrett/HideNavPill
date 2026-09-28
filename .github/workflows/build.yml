@@ -19,11 +19,9 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install platform 35 and build-tools
+      - name: Install Android SDK packages
         run: |
+          yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Grant execute permission for gradlew
