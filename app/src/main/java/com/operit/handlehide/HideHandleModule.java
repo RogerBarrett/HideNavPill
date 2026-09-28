@@ -1,5 +1,6 @@
 package com.operit.handlehide;
 
+import android.graphics.Canvas;
 import android.view.View;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -9,112 +10,104 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Hide the gesture-navigation "pill" / home handle on Android 17 (PixelOS).
+ * HideNavPill (Hide Handle) - LSPosed module.
  *
- * HISTORY:
- *   v3 hooked StashedHandleView.draw -> NoSuchMethodError (class has no draw()).
- *   v4 hooked updateHandleColor + View.setBackgroundColor. Both hooks fired
- *      successfully (confirmed via LSPosed logs), but the pill only turned
- *      BLACK instead of disappearing -> clearing the background colour is NOT
- *      enough; the bar is still painted by another layer/mechanism.
+ * Goal: make the gesture navigation "pill" (home handle) invisible on
+ * PixelOS / Android 17 (Launcher3 taskbar) WITHOUT breaking gestures:
+ *   - swipe up to home
+ *   - edge back gesture
+ *   - long-press pill -> Google Circle to Search
  *
- * STRATEGY (v5, decisive):
- *   Force the StashedHandleView itself to be invisible. A pure drawing View has
- *   no touch handling, so hiding it cannot affect swipe-up / back / assistant.
- *   1. Hook every StashedHandleView constructor -> right after creation call
- *      setVisibility(INVISIBLE) + setAlpha(0f) + setBackgroundColor(TRANSPARENT).
- *   2. Hook updateHandleColor(boolean, boolean) -> no-op (belt & braces).
- *   3. Guard hook View.setBackgroundColor(int) for StashedHandleView instances.
+ * History / lessons learned:
+ *   v3: hooked NavigationHandle.onDraw in SystemUI. Wrong target (that is NOT
+ *       the pill that is drawn on Pixel launcher). No effect.
+ *   v4: hooked StashedHandleView.updateHandleColor -> no-op + forced transparent
+ *       background. Pill became BLACK instead of disappearing -> proving we hit
+ *       the right View but clearing its color is not enough.
+ *   v5: forced the View INVISIBLE + alpha 0 -> pill disappeared (SUCCESS visually)
+ *       but long-press Circle to Search stopped working, because an INVISIBLE
+ *       View is removed from hit-testing, so the system no longer sees the
+ *       handle region.
+ *   v6: ONLY skip rasterisation. Hook android.view.View#draw(Canvas); when the
+ *       receiver is a StashedHandleView, swallow the call (setResult(null)).
+ *       The View stays VISIBLE with alpha 1, keeps its bounds, keeps its
+ *       hit-test region, so circle-to-search long-press keeps working, but
+ *       nothing is ever drawn -> pill invisible.
  *
- * SCOPE: com.google.android.apps.nexuslauncher (Launcher3).
+ * Note: StashedHandleView does NOT override draw/onDraw (verified via smali),
+ * it is plain View + background color. Therefore the only way to intercept it
+ * is to hook View#draw itself (hooking the subclass would throw
+ * NoSuchMethodError, which is exactly why v3's draw attempt failed).
  */
 public class HideHandleModule implements IXposedHookLoadPackage {
 
     private static final String TAG = "HideHandle";
     private static final String LAUNCHER = "com.google.android.apps.nexuslauncher";
-    private static final String HANDLE_VIEW =
-            "com.android.launcher3.taskbar.StashedHandleView";
-
-    private void log(String s) {
-        XposedBridge.log("[" + TAG + "] " + s);
-    }
-
-    private void hide(View v) {
-        try {
-            v.setVisibility(View.INVISIBLE);
-            v.setAlpha(0f);
-            v.setBackgroundColor(0x00000000);
-        } catch (Throwable t) {
-            log("hide() failed: " + t);
-        }
-    }
-
-    private void hookView(ClassLoader cl) {
-        Class<?> handleView;
-        try {
-            handleView = XposedHelpers.findClass(HANDLE_VIEW, cl);
-        } catch (Throwable t) {
-            log("class not found " + HANDLE_VIEW + ": " + t);
-            return;
-        }
-
-        // 1) Hide the view as soon as any constructor returns.
-        try {
-            XposedBridge.hookAllConstructors(handleView, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (param.thisObject instanceof View) {
-                        hide((View) param.thisObject);
-                    }
-                }
-            });
-            log("Hooked StashedHandleView constructors -> hidden");
-        } catch (Throwable t) {
-            log("FAILED constructor hook: " + t);
-        }
-
-        // 2) Neutralise the colour entry point.
-        try {
-            XposedHelpers.findAndHookMethod(handleView, "updateHandleColor",
-                    boolean.class, boolean.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            param.setResult(null);
-                            if (param.thisObject instanceof View) {
-                                hide((View) param.thisObject);
-                            }
-                        }
-                    });
-            log("Hooked updateHandleColor -> no-op + hidden");
-        } catch (Throwable t) {
-            log("FAILED updateHandleColor hook: " + t);
-        }
-
-        // 3) Guard any background colour write on the handle.
-        try {
-            XposedHelpers.findAndHookMethod(View.class, "setBackgroundColor",
-                    int.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            if (handleView.isInstance(param.thisObject)) {
-                                param.args[0] = 0x00000000;
-                                if (param.thisObject instanceof View) {
-                                    ((View) param.thisObject)
-                                            .setVisibility(View.INVISIBLE);
-                                }
-                            }
-                        }
-                    });
-            log("Hooked View.setBackgroundColor (guard for StashedHandleView)");
-        } catch (Throwable t) {
-            log("FAILED setBackgroundColor guard: " + t);
-        }
-    }
+    private static final String HANDLE_VIEW = "com.android.launcher3.taskbar.StashedHandleView";
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+        if (lpparam == null || lpparam.packageName == null) return;
         if (!LAUNCHER.equals(lpparam.packageName)) return;
-        hookView(lpparam.classLoader);
-        log("HideNavPill module active (launcher scope) v5");
+
+        final Class<?> handleView;
+        try {
+            handleView = XposedHelpers.findClass(HANDLE_VIEW, lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": StashedHandleView not found, abort");
+            return;
+        }
+
+        // (1) CORE: never rasterise the handle. Keeps View alive & hit-testable.
+        try {
+            XposedHelpers.findAndHookMethod(View.class, "draw", Canvas.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.thisObject != null
+                                    && handleView.isInstance(param.thisObject)) {
+                                param.setResult(null); // skip drawing entirely
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hooked View.draw -> handle is never rasterised (hit area kept)");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": hook View.draw failed: " + t);
+        }
+
+        // (2) Safety net: if something sets a background colour, keep it transparent
+        //     so that even if draw() is bypassed by a parent composite, no black bar.
+        try {
+            XposedHelpers.findAndHookMethod(View.class, "setBackgroundColor", int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.thisObject != null
+                                    && handleView.isInstance(param.thisObject)) {
+                                param.args[0] = 0x00000000;
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hooked View.setBackgroundColor (guard for StashedHandleView)");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": hook View.setBackgroundColor failed: " + t);
+        }
+
+        // (3) Legacy: make colour updates a no-op (avoids animations fighting us).
+        try {
+            XposedHelpers.findAndHookMethod(HANDLE_VIEW, lpparam.classLoader,
+                    "updateHandleColor", boolean.class, boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            param.setResult(null);
+                        }
+                    });
+            XposedBridge.log(TAG + ": Hooked updateHandleColor -> pill stays transparent");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": hook updateHandleColor failed: " + t);
+        }
+
+        XposedBridge.log(TAG + ": HideNavPill module active (launcher scope) v6");
     }
 }
