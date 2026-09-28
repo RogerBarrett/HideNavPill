@@ -1,6 +1,6 @@
 id=com.operit.handlehide
 name=Hide Nav Pill
 author=operit
-version=1.4
-versionCode=5
-description=Hides the gesture navigation pill (home handle) on PixelOS Android 17. Hides the handle by forcing Launcher3 StashedHandleView invisible (v5). Layout, insets and gestures are untouched.
+version=1.5
+versionCode=6
+description=Hides the gesture navigation pill (home handle) on PixelOS Android 17. Skips rasterisation of Launcher3 StashedHandleView via View.draw so the handle is never drawn, while keeping the View visible and hit-testable (Circle to Search long-press preserved). Layout, insets and gestures untouched (v6).
