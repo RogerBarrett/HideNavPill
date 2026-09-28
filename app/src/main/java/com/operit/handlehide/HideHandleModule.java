@@ -11,58 +11,66 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /**
  * Hide the gesture navigation "pill" (home handle) on Android 17 / PixelOS.
  *
- * Target: com.android.systemui.navigationbar.gestural.NavigationHandle
- *         (extends android.view.View, overrides onDraw(Canvas))
+ * From decompiling the device SystemUI:
+ *   NavigationHandle (extends android.view.View) has public onDraw(Canvas),
+ *   but the concrete drawing path is OVERRIDDEN by the subclass
+ *   QuickswitchOrientedNavHandle, whose onDraw is final and calls
+ *   computeHomeHandleBounds() + canvas.drawRoundRect(rect, r, r, mPaint).
  *
- * Only the drawing is suppressed. Gesture handling (edge back, swipe up home,
- * long-press assistant) lives in other methods/classes and is untouched.
+ * Hooking only NavigationHandle.onDraw therefore logs once or twice but the
+ * visible pill keeps being painted by the subclass. We hook BOTH.
+ * Gesture handling is untouched (swipe-up-home, edge-back, long-press).
  */
 public class HideHandleModule implements IXposedHookLoadPackage {
 
     private static final String TAG = "HideHandle";
     private static final String SYSTEMUI = "com.android.systemui";
+
     private static final String HANDLE_CLASS =
             "com.android.systemui.navigationbar.gestural.NavigationHandle";
+    private static final String ORIENTED_HANDLE_CLASS =
+            "com.android.systemui.navigationbar.gestural.QuickswitchOrientedNavHandle";
 
     private void log(String s) {
         XposedBridge.log("[" + TAG + "] " + s);
     }
 
-    @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        if (!SYSTEMUI.equals(lpparam.packageName)) return;
-
+    private void hookHandleClass(ClassLoader cl, String className) {
         try {
-            Class<?> handleClass = XposedHelpers.findClass(HANDLE_CLASS, lpparam.classLoader);
+            Class<?> c = XposedHelpers.findClass(className, cl);
 
-            // Primary hook: suppress the round-rect drawing entirely.
-            XposedHelpers.findAndHookMethod(handleClass, "onDraw", Canvas.class,
+            XposedHelpers.findAndHookMethod(c, "onDraw", Canvas.class,
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            // Returning early means Canvas.drawRoundRect() never runs.
                             param.setResult(null);
                         }
                     });
 
-            // Safety net: if any code path forces alpha>0, the View is still
-            // invisible because onDraw is suppressed; but also force alpha 0.
             try {
-                XposedHelpers.findAndHookMethod(handleClass, "setAlpha", float.class,
+                XposedHelpers.findAndHookMethod(c, "setAlpha", float.class,
                         new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
                                 param.args[0] = 0f;
                             }
                         });
-            } catch (Throwable t) {
-                log("setAlpha hook skipped: " + t);
+            } catch (Throwable ignored) {
             }
 
-            log("Hooked NavigationHandle onDraw -> pill hidden");
+            log("Hooked " + className + ".onDraw -> pill hidden");
         } catch (Throwable t) {
-            log("FAILED: " + t);
-            XposedBridge.log(t);
+            log("skip " + className + ": " + t);
         }
+    }
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+        if (!SYSTEMUI.equals(lpparam.packageName)) return;
+
+        hookHandleClass(lpparam.classLoader, HANDLE_CLASS);
+        hookHandleClass(lpparam.classLoader, ORIENTED_HANDLE_CLASS);
+
+        log("HideNavPill module active");
     }
 }
