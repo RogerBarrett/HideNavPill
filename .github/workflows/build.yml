@@ -19,10 +19,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Locate and export Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls -la $ANDROID_HOME || true
+          ls -la $ANDROID_HOME/cmdline-tools || true
+          find $ANDROID_HOME -name sdkmanager -type f 2>/dev/null || true
+
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          SDKMANAGER=$(find $ANDROID_HOME -name sdkmanager -type f | head -n 1)
+          echo "Using: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
